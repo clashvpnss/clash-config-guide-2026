@@ -23,10 +23,6 @@ log-level: info             # silent / error / warning / info / debug
 ipv6: false                 # 多数家庭网络 IPv6 支持不完整，关闭可减少异常
 external-controller: 127.0.0.1:9090   # 面板控制端口，仅监听本机
 
-# 统一延迟测试地址（返回 204 空响应，比 ping 更能反映实际可用性）
-# 部分网络下 gstatic 不可达，可换成 http://cp.cloudflare.com/generate_204
-proxy-test-url: &test-url http://www.gstatic.com/generate_204
-
 # ----------------------------------------------------------------------------
 # 二、订阅（proxy-providers）
 #     把 url 换成你自己的订阅链接即可。订阅链接等同账号凭证，不要外传。
@@ -39,7 +35,7 @@ proxy-providers:
     path: ./providers/airport.yaml
     health-check:
       enable: true
-      url: *test-url
+      url: http://www.gstatic.com/generate_204   # 返回 204 空响应，比 ping 更能反映实际可用性
       interval: 300                     # 节点健康检查间隔（秒）
     # 可选：按节点名筛选。例如只要含「香港」「日本」的节点
     # filter: "(?i)香港|HK|日本|JP"
@@ -124,7 +120,7 @@ proxy-groups:
 
   - name: ♻️ 自动选择
     type: url-test
-    url: *test-url
+    url: http://www.gstatic.com/generate_204   # 返回 204 空响应，比 ping 更能反映实际可用性
     interval: 300
     tolerance: 50                       # 容差(ms)，避免延迟接近时反复横跳
     use:
@@ -139,7 +135,7 @@ proxy-groups:
   # 原因：这类服务对出口 IP 跳变敏感，频繁换 IP 容易触发验证甚至风控
   - name: 🤖 AI 与账号
     type: fallback
-    url: *test-url
+    url: http://www.gstatic.com/generate_204   # 返回 204 空响应，比 ping 更能反映实际可用性
     interval: 600
     use:
       - airport
@@ -234,7 +230,15 @@ rules:
   - DOMAIN-SUFFIX,telegram.org,🚀 节点选择
   - DOMAIN-SUFFIX,wikipedia.org,🚀 节点选择
 
-  # 使用内置地理数据库批量匹配（Mihomo 支持，比逐条写省事得多）
+  # --- 以下 GEOSITE 规则用地理数据库批量匹配，比逐条写域名省事得多 ---
+  #
+  # ⚠️ 前提：需要 geosite.dat / geoip.dat 数据文件。
+  #    多数客户端（Clash Verge Rev、Mihomo Party 等）会自动下载并定期更新；
+  #    若你是手动跑 mihomo 内核，首次运行前需自行放置数据文件，
+  #    否则这些规则不生效（流量会落到最后的 MATCH 兜底）。
+  #
+  # 不确定是否可用时，上面第 2–6 组的 DOMAIN-SUFFIX 规则已覆盖常用站点，
+  # 可以先删掉这一段，确认能正常上网后再逐条加回来。
   - GEOSITE,category-ads-all,REJECT
   - GEOSITE,openai,🤖 AI 与账号
   - GEOSITE,netflix,🎬 流媒体
