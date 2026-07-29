@@ -1,0 +1,273 @@
+# =============================================================================
+#  Clash / Mihomo 配置模板
+#  https://github.com/clashvpnss/clash-config-guide-2026
+#
+#  用法：把下面 proxy-providers 里的订阅链接换成你自己的，其余可直接用。
+#  适用内核：Mihomo（Clash Meta）。原版 Clash 内核已于 2023 年停止维护，
+#           不支持 VLESS / Hysteria 2 等协议，本模板部分功能在其上无效。
+#
+#  这份模板刻意做了三件事，对应最常见的三个坑：
+#    1. rules 顺序正确 —— GEOIP,CN 放在自定义规则之后（放前面会让后续规则全部失效）
+#    2. AI / 账号类服务单独分组走 fallback —— 避免 url-test 周期性切换 IP 触发风控
+#    3. DNS 用 DoH + fallback-filter —— 防污染，同时避免国内域名被解析到境外
+# =============================================================================
+
+# ----------------------------------------------------------------------------
+# 一、基础端口与运行模式
+# ----------------------------------------------------------------------------
+mixed-port: 7890            # HTTP 与 SOCKS5 共用端口（推荐，省去分别配置）
+allow-lan: false            # 是否允许局域网其他设备连入。开启前请确认网络环境可信
+bind-address: '*'
+mode: rule                  # rule 分流 / global 全局 / direct 直连。日常用 rule
+log-level: info             # silent / error / warning / info / debug
+ipv6: false                 # 多数家庭网络 IPv6 支持不完整，关闭可减少异常
+external-controller: 127.0.0.1:9090   # 面板控制端口，仅监听本机
+
+# 统一延迟测试地址（返回 204 空响应，比 ping 更能反映实际可用性）
+# 部分网络下 gstatic 不可达，可换成 http://cp.cloudflare.com/generate_204
+proxy-test-url: &test-url http://www.gstatic.com/generate_204
+
+# ----------------------------------------------------------------------------
+# 二、订阅（proxy-providers）
+#     把 url 换成你自己的订阅链接即可。订阅链接等同账号凭证，不要外传。
+# ----------------------------------------------------------------------------
+proxy-providers:
+  airport:
+    type: http
+    url: "在这里填入你的订阅链接"
+    interval: 3600                      # 自动更新间隔（秒），3600 = 每小时
+    path: ./providers/airport.yaml
+    health-check:
+      enable: true
+      url: *test-url
+      interval: 300                     # 节点健康检查间隔（秒）
+    # 可选：按节点名筛选。例如只要含「香港」「日本」的节点
+    # filter: "(?i)香港|HK|日本|JP"
+    # 可选：排除倍率高的节点，避免流量意外消耗
+    # exclude-filter: "(?i)剩余|到期|官网|x[2-9]"
+
+# ----------------------------------------------------------------------------
+# 三、DNS
+#     enhanced-mode: fake-ip 让 Clash 内部接管解析，减少 DNS 泄漏
+# ----------------------------------------------------------------------------
+dns:
+  enable: true
+  ipv6: false
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+
+  # fake-ip 例外：这些需要真实 IP，否则会异常
+  # 局域网设备发现、部分游戏、以及依赖内网解析的服务
+  fake-ip-filter:
+    - '*.lan'
+    - '*.local'
+    - '+.stun.*.*'                      # 游戏 / 语音 NAT 穿透
+    - '+.stun.*.*.*'
+    - 'localhost.ptlogin2.qq.com'
+    - '+.msftconnecttest.com'           # Windows 网络连通性检测
+    - '+.msftncsi.com'
+    - 'time.*.com'                      # NTP 对时（协议对时间敏感，见 README）
+    - 'ntp.*.com'
+
+  # 用于解析下面 DoH 服务器域名本身，必须是纯 IP
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+
+  # 主 DNS：走加密查询，避免本地污染
+  nameserver:
+    - https://1.1.1.1/dns-query
+    - https://dns.google/dns-query
+
+  # 国内域名用国内 DNS 解析，拿到就近的 CDN 节点
+  fallback:
+    - https://223.5.5.5/dns-query
+    - https://doh.pub/dns-query
+
+  # 关键：结果落在国内 IP 段时才采用 fallback 结果
+  # 没有这段，国内网站可能被解析到境外节点，反而变慢
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+
+# ----------------------------------------------------------------------------
+# 四、TUN 模式（默认关闭）
+#     系统代理管不到的程序（游戏、命令行工具、Docker）需要它
+#     开启需要管理员/root 权限，可能与 VPN、虚拟机网卡冲突
+# ----------------------------------------------------------------------------
+tun:
+  enable: false
+  stack: mixed                          # mixed / gvisor / system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack:
+    - any:53
+
+# ----------------------------------------------------------------------------
+# 五、节点分组
+#     select   手动选
+#     url-test 自动选最快 —— 会周期性切换出口 IP
+#     fallback 按顺序用，坏了才切 —— 出口 IP 稳定
+# ----------------------------------------------------------------------------
+proxy-groups:
+
+  # 主出口：默认走自动选择，也可手动指定
+  - name: 🚀 节点选择
+    type: select
+    proxies:
+      - ♻️ 自动选择
+      - 🎯 手动切换
+      - DIRECT
+
+  - name: ♻️ 自动选择
+    type: url-test
+    url: *test-url
+    interval: 300
+    tolerance: 50                       # 容差(ms)，避免延迟接近时反复横跳
+    use:
+      - airport
+
+  - name: 🎯 手动切换
+    type: select
+    use:
+      - airport
+
+  # AI 与账号类服务：用 fallback 而非 url-test
+  # 原因：这类服务对出口 IP 跳变敏感，频繁换 IP 容易触发验证甚至风控
+  - name: 🤖 AI 与账号
+    type: fallback
+    url: *test-url
+    interval: 600
+    use:
+      - airport
+
+  # 流媒体：解锁能力取决于出口 IP 属性，通常需要手动挑能解锁的节点
+  - name: 🎬 流媒体
+    type: select
+    proxies:
+      - 🚀 节点选择
+    use:
+      - airport
+
+  # 游戏：优先低延迟且支持 UDP 转发的节点
+  # 注意 NAT 类型由服务端决定，配置改不了（见 README 第零节）
+  - name: 🎮 游戏平台
+    type: select
+    proxies:
+      - 🚀 节点选择
+      - DIRECT
+    use:
+      - airport
+
+  # 国内直连组：银行、支付、政务类放这里，避免海外 IP 触发风控
+  - name: 🇨🇳 国内直连
+    type: select
+    proxies:
+      - DIRECT
+      - 🚀 节点选择
+
+  # 兜底：未匹配任何规则的流量
+  - name: 🐟 漏网之鱼
+    type: select
+    proxies:
+      - 🚀 节点选择
+      - DIRECT
+
+# ----------------------------------------------------------------------------
+# 六、分流规则
+#
+#  ⚠️ 顺序至关重要：自上而下逐条匹配，命中即停止。
+#     最常见的错误是把 GEOIP,CN,DIRECT 写在自定义规则前面，
+#     那会导致所有解析到国内 IP 的域名全部直连，后面的规则永远不生效。
+#
+#  no-resolve 表示不触发 DNS 解析就判断，用于 IP 类规则以提升性能
+# ----------------------------------------------------------------------------
+rules:
+
+  # --- 1. 局域网与本机：必须最先直连 ---
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - GEOIP,lan,DIRECT,no-resolve
+
+  # --- 2. 必须直连的国内服务（放在 GEOIP,CN 之前，防止被后面规则影响）---
+  - DOMAIN-SUFFIX,alipay.com,🇨🇳 国内直连
+  - DOMAIN-SUFFIX,taobao.com,🇨🇳 国内直连
+  - DOMAIN-SUFFIX,jd.com,🇨🇳 国内直连
+  - DOMAIN-SUFFIX,icbc.com.cn,🇨🇳 国内直连
+  - DOMAIN-KEYWORD,bank,🇨🇳 国内直连
+
+  # --- 3. AI 与账号类：固定出口，避免 IP 跳变 ---
+  - DOMAIN-SUFFIX,openai.com,🤖 AI 与账号
+  - DOMAIN-SUFFIX,chatgpt.com,🤖 AI 与账号
+  - DOMAIN-SUFFIX,anthropic.com,🤖 AI 与账号
+  - DOMAIN-SUFFIX,claude.ai,🤖 AI 与账号
+  - DOMAIN-SUFFIX,gemini.google.com,🤖 AI 与账号
+  - DOMAIN-KEYWORD,openai,🤖 AI 与账号
+
+  # --- 4. 流媒体 ---
+  - DOMAIN-SUFFIX,netflix.com,🎬 流媒体
+  - DOMAIN-SUFFIX,nflxvideo.net,🎬 流媒体
+  - DOMAIN-SUFFIX,disneyplus.com,🎬 流媒体
+  - DOMAIN-SUFFIX,youtube.com,🎬 流媒体
+  - DOMAIN-SUFFIX,googlevideo.com,🎬 流媒体
+  - DOMAIN-SUFFIX,spotify.com,🎬 流媒体
+
+  # --- 5. 游戏平台 ---
+  - DOMAIN-SUFFIX,steamcommunity.com,🎮 游戏平台
+  - DOMAIN-SUFFIX,epicgames.com,🎮 游戏平台
+  # Steam 下载走直连更快（下载对带宽敏感，社区页才需要代理）
+  - DOMAIN-SUFFIX,steamcontent.com,DIRECT
+  - DOMAIN-SUFFIX,steamserver.net,DIRECT
+
+  # --- 6. 常用需代理的站点 ---
+  - DOMAIN-SUFFIX,google.com,🚀 节点选择
+  - DOMAIN-SUFFIX,github.com,🚀 节点选择
+  - DOMAIN-SUFFIX,githubusercontent.com,🚀 节点选择
+  - DOMAIN-SUFFIX,twitter.com,🚀 节点选择
+  - DOMAIN-SUFFIX,x.com,🚀 节点选择
+  - DOMAIN-SUFFIX,telegram.org,🚀 节点选择
+  - DOMAIN-SUFFIX,wikipedia.org,🚀 节点选择
+
+  # 使用内置地理数据库批量匹配（Mihomo 支持，比逐条写省事得多）
+  - GEOSITE,category-ads-all,REJECT
+  - GEOSITE,openai,🤖 AI 与账号
+  - GEOSITE,netflix,🎬 流媒体
+  - GEOSITE,youtube,🎬 流媒体
+  - GEOSITE,telegram,🚀 节点选择
+  - GEOSITE,geolocation-!cn,🚀 节点选择
+  - GEOSITE,cn,🇨🇳 国内直连
+
+  # --- 7. 按 IP 归属兜底：必须放在所有自定义规则之后 ---
+  - GEOIP,CN,🇨🇳 国内直连
+
+  # --- 8. 最终兜底，必须放在最后一行 ---
+  - MATCH,🐟 漏网之鱼
+
+# =============================================================================
+#  常见问题
+#
+#  Q: 导入后提示配置解析错误？
+#     检查缩进是否为空格（YAML 不接受 Tab），以及订阅链接是否用引号包裹。
+#
+#  Q: 节点列表是空的？
+#     多半是订阅链接过期，或订阅域名本身不可达（需先用其他方式连上一次）。
+#
+#  Q: 规则写了不生效？
+#     检查是否被前面的规则先命中了 —— 尤其是 GEOIP,CN 的位置。
+#
+#  Q: 某些程序不走代理？
+#     系统代理管不到它们，把 tun.enable 改为 true 试试。
+#
+#  Q: 游戏能登录但进不了对战？
+#     链路 UDP 转发或 NAT 类型的问题，属服务端能力，配置改不了。
+#
+#  更多排查：https://clashvpnss.com/faq-troubleshooting.html
+#  配置详解：https://clashvpnss.com/software_article_7.html
+#  分流规则：https://clashvpnss.com/science_article_9.html
+# =============================================================================
